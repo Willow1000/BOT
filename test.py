@@ -4,8 +4,6 @@ import json
 import logging
 import re
 import time
-import signal
-import sys
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Union
 from telethon import TelegramClient, events
@@ -81,7 +79,6 @@ SETTINGS_FILE = "user_settings.json"
 MESSAGE_TRACKING_FILE = "message_tracking.json"
 DISCORD_ROUTES_FILE = "discord_routes.json"
 MESSAGE_MAPPINGS_FILE = "message_mappings.json"  # SQLite database for message mappings
-DISCORD_MESSAGE_MAPPINGS_FILE = "discord_message_mappings.json"  # New: For Discord message mappings
 
 # Media statistics
 media_forwarding_stats = {}
@@ -98,157 +95,10 @@ channel_management_states = {}
 keyword_management_states = {}
 media_filter_states = {}
 
-# ========= GRACEFUL SHUTDOWN HANDLER =========
-class GracefulShutdown:
-    """Handle graceful shutdown of the bot"""
-    def __init__(self):
-        self.shutting_down = False
-        self.client = client
-        self.tg_bot = tg_bot
-        
-    async def shutdown(self, signum=None, frame=None):
-        """Perform graceful shutdown"""
-        if self.shutting_down:
-            return
-            
-        self.shutting_down = True
-        log_activity("🚨 Initiating graceful shutdown...")
-        
-        try:
-            # Disconnect Telegram client
-            if self.client.is_connected():
-                await self.client.disconnect()
-                log_activity("✅ Telegram client disconnected")
-            
-            # Stop the bot application if it exists
-            if 'application' in globals():
-                application = globals()['application']
-                await application.stop()
-                log_activity("✅ Bot application stopped")
-                
-            log_activity("✅ Shutdown completed successfully")
-            
-        except Exception as e:
-            log_error("Error during shutdown", e)
-        finally:
-            sys.exit(0)
-
-# Global shutdown handler
-graceful_shutdown = GracefulShutdown()
-
-# ========= DISCORD MESSAGE MAPPING SYSTEM =========
-def setup_discord_message_mappings_file():
-    """Initialize JSON file for Discord message mappings"""
-    try:
-        if not os.path.exists(DISCORD_MESSAGE_MAPPINGS_FILE):
-            with open(DISCORD_MESSAGE_MAPPINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({}, f, indent=2, ensure_ascii=False)
-            log_activity("Discord message mappings JSON file initialized")
-        else:
-            log_activity("Discord message mappings JSON file already exists")
-    except Exception as e:
-        log_error("Failed to initialize Discord message mappings JSON file", e)
-
-def load_discord_message_mappings() -> Dict:
-    """Load Discord message mappings from JSON file"""
-    try:
-        if os.path.exists(DISCORD_MESSAGE_MAPPINGS_FILE):
-            with open(DISCORD_MESSAGE_MAPPINGS_FILE, "r", encoding="utf-8") as f:
-                mappings = json.load(f)
-            return mappings
-        else:
-            return {}
-    except Exception as e:
-        log_error(f"Failed to load Discord message mappings from {DISCORD_MESSAGE_MAPPINGS_FILE}", e)
-        return {}
-
-def save_discord_message_mappings(mappings: Dict) -> None:
-    """Save Discord message mappings to JSON file"""
-    try:
-        with open(DISCORD_MESSAGE_MAPPINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(mappings, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        log_error(f"Failed to save Discord message mappings to {DISCORD_MESSAGE_MAPPINGS_FILE}", e)
-
-def update_discord_message_mapping(user_id_str: str, source_chat_id: int, source_message_id: int, 
-                                 discord_channel_id: str, discord_message_id: str) -> None:
-    """Update Discord message mapping for tracking source->Discord messages using JSON"""
-    try:
-        mappings = load_discord_message_mappings()
-        
-        # Initialize user structure if not exists
-        if user_id_str not in mappings:
-            mappings[user_id_str] = {}
-        
-        # Initialize source chat structure if not exists
-        source_chat_str = str(source_chat_id)
-        if source_chat_str not in mappings[user_id_str]:
-            mappings[user_id_str][source_chat_str] = {}
-        
-        # Initialize source message structure if not exists
-        source_msg_str = str(source_message_id)
-        if source_msg_str not in mappings[user_id_str][source_chat_str]:
-            mappings[user_id_str][source_chat_str][source_msg_str] = {}
-        
-        # Update the Discord mapping
-        mappings[user_id_str][source_chat_str][source_msg_str][discord_channel_id] = discord_message_id
-        
-        save_discord_message_mappings(mappings)
-        
-        log_activity(f"Discord message mapping updated: user {user_id_str}, source {source_chat_id}:{source_message_id} -> discord {discord_channel_id}:{discord_message_id}")
-        
-    except Exception as e:
-        log_error(f"Error updating Discord message mapping for user {user_id_str}", e)
-
-def get_discord_message_ids(user_id_str: str, source_chat_id: int, source_message_id: int) -> Dict[str, str]:
-    """Get all Discord message IDs for a source message from JSON"""
-    try:
-        mappings = load_discord_message_mappings()
-        
-        source_chat_str = str(source_chat_id)
-        source_msg_str = str(source_message_id)
-        
-        # Navigate through the nested structure
-        user_mappings = mappings.get(user_id_str, {})
-        chat_mappings = user_mappings.get(source_chat_str, {})
-        message_mappings = chat_mappings.get(source_msg_str, {})
-        
-        return message_mappings
-        
-    except Exception as e:
-        log_error(f"Error getting Discord message IDs for user {user_id_str}", e)
-        return {}
-
-def remove_discord_message_mapping(user_id_str: str, source_chat_id: int, source_message_id: int) -> None:
-    """Remove Discord message mapping when source message is deleted"""
-    try:
-        mappings = load_discord_message_mappings()
-        
-        source_chat_str = str(source_chat_id)
-        source_msg_str = str(source_message_id)
-        
-        # Check if the mapping exists
-        if (user_id_str in mappings and 
-            source_chat_str in mappings[user_id_str] and 
-            source_msg_str in mappings[user_id_str][source_chat_str]):
-            
-            # Remove the specific message mapping
-            del mappings[user_id_str][source_chat_str][source_msg_str]
-            
-            # Clean up empty structures
-            if not mappings[user_id_str][source_chat_str]:
-                del mappings[user_id_str][source_chat_str]
-            if not mappings[user_id_str]:
-                del mappings[user_id_str]
-            
-            save_discord_message_mappings(mappings)
-            
-            log_activity(f"Discord message mapping removed: user {user_id_str}, source {source_chat_id}:{source_message_id}")
-            
-    except Exception as e:
-        log_error(f"Error removing Discord message mapping for user {user_id_str}", e)
 
 # ========= ENHANCED MESSAGE MAPPING SYSTEM (JSON) =========
+
+
 def setup_message_mappings_file():
     """Initialize JSON file for message mappings"""
     try:
@@ -448,254 +298,6 @@ class DeletionPerformance:
 # Global performance tracker
 deletion_performance = DeletionPerformance()
 
-# ========= DISCORD MESSAGE DELETION HANDLER =========
-async def handle_discord_message_deletion(user_id_str: str, source_chat_id: int, source_message_id: int) -> None:
-    """Handle deletion of messages in Discord channels when source message is deleted"""
-    try:
-        deletion_start_time = time.time()
-        
-        # Get Discord message mappings for this source message
-        discord_messages = get_discord_message_ids(user_id_str, source_chat_id, source_message_id)
-        
-        if not discord_messages:
-            log_activity(f"❌ No Discord message mappings found for user {user_id_str}, source {source_chat_id}:{source_message_id}")
-            return
-        
-        deleted_count = 0
-        error_count = 0
-        
-        # Delete messages in ALL Discord channels in parallel
-        deletion_tasks = []
-        
-        for discord_channel_id, discord_message_id in discord_messages.items():
-            task = asyncio.create_task(
-                delete_single_discord_message(discord_channel_id, discord_message_id, user_id_str)
-            )
-            deletion_tasks.append(task)
-        
-        # Wait for all deletions to complete
-        results = await asyncio.gather(*deletion_tasks, return_exceptions=True)
-        
-        # Count results
-        for result in results:
-            if isinstance(result, Exception):
-                error_count += 1
-                log_error(f"Error deleting Discord message", result)
-            elif result is True:
-                deleted_count += 1
-            else:
-                error_count += 1
-        
-        # Remove the Discord mapping regardless of deletion success
-        remove_discord_message_mapping(user_id_str, source_chat_id, source_message_id)
-        
-        deletion_time = time.time() - deletion_start_time
-        log_activity(f"📊 User {user_id_str}: Deleted {deleted_count}/{len(discord_messages)} Discord messages in {deletion_time:.3f}s (Errors: {error_count})")
-        
-        # Record performance
-        deletion_performance.record_deletion(
-            success=(deleted_count > 0),
-            deletion_time=deletion_time
-        )
-        
-    except Exception as e:
-        log_error(f"Error in handle_discord_message_deletion for user {user_id_str}", e)
-
-async def delete_single_discord_message(discord_channel_id: str, discord_message_id: str, user_id_str: str) -> bool:
-    """Delete a single message from Discord channel"""
-    try:
-        if not DISCORD_TOKEN:
-            log_error("No Discord token configured for message deletion", None)
-            return False
-        
-        headers = {
-            'Authorization': f'Bot {DISCORD_TOKEN}',
-            'Content-Type': 'application/json'
-        }
-        
-        url = f"https://discord.com/api/v10/channels/{discord_channel_id}/messages/{discord_message_id}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.delete(url, headers=headers) as response:
-                if response.status == 204:
-                    log_activity(f"✅ DISCORD DELETE: User {user_id_str} - Channel {discord_channel_id}:{discord_message_id}")
-                    return True
-                else:
-                    error_text = await response.text()
-                    log_error(f"Discord API deletion error: {response.status} - {error_text}", None)
-                    return False
-        
-    except Exception as e:
-        log_error(f"Error deleting Discord message in channel {discord_channel_id}", e)
-        return False
-
-# ========= ENHANCED INSTANT MESSAGE DELETION HANDLER =========
-@client.on(events.MessageDeleted)
-async def handle_message_deleted(event):
-    """Enhanced message deletion handler with performance monitoring and instant deletion"""
-    try:
-        deletion_start_time = time.time()  
-        # Get the chat where deletion occurred
-        try:
-            chat = await event.get_chat()
-        except Exception as e:
-            log_error("Could not get chat from deletion event", e)
-            return
-            
-        deleted_message_ids = event.deleted_ids
-        
-        if not deleted_message_ids:
-            return
-        
-        log_activity(f"🚨 INSTANT DELETION: Channel {getattr(chat, 'id', 'unknown')} - Message IDs: {deleted_message_ids}")
-        
-        # Clean up orphaned mappings first
-        cleanup_orphaned_mappings()
-        
-        # Refresh settings to get current user configurations
-        fresh_settings = load_settings()
-        
-        # Process for each user CONCURRENTLY for faster processing
-        user_tasks = []
-        for user_id_str, settings in fresh_settings.items():
-            try:
-                routes = settings.get("routes", {})
-                discord_routes = get_user_discord_routes(int(user_id_str))
-                
-                # Check if this chat is a source channel for any of the user's routes
-                for source_channel, targets in routes.items():
-                    if stored_value_matches_chat(source_channel, chat):
-                        
-                        # For each deleted message, create concurrent deletion tasks
-                        for deleted_id in deleted_message_ids:
-                            # Delete from Telegram destinations
-                            telegram_task = asyncio.create_task(
-                                delete_corresponding_messages_instant(
-                                    user_id_str, chat.id, deleted_id, targets 
-                                )
-                            )
-                            user_tasks.append(telegram_task)
-                            
-                            # Delete from Discord destinations if there are Discord routes
-                            if source_channel in discord_routes:
-                                discord_task = asyncio.create_task(
-                                    handle_discord_message_deletion(user_id_str, chat.id, deleted_id)
-                                )
-                                user_tasks.append(discord_task)
-                        break
-            except Exception as e:
-                log_error(f"Error processing message deletion for user {user_id_str}", e)
-        
-        # Wait for all deletion tasks to complete
-        if user_tasks:
-            await asyncio.gather(*user_tasks, return_exceptions=True)
-        
-        deletion_time = time.time() - deletion_start_time
-        log_activity(f"✅ DELETION COMPLETE: Processed {len(deleted_message_ids)} messages in {deletion_time:.3f} seconds")
-       
-    except Exception as e:
-        log_error("Critical error in message deletion handler", e)
-
-async def delete_corresponding_messages_instant(user_id_str: str, source_chat_id: int, source_message_id: int, targets: List[str]) -> None:
-    """INSTANT deletion of corresponding messages with parallel processing"""
-    try:
-        message_start_time = time.time()
-        
-        # Get all destination message IDs for this source message
-        destination_messages = get_destination_message_ids(user_id_str, source_chat_id, source_message_id)
-        
-        if not destination_messages:
-            log_activity(f"❌ No message mappings found for user {user_id_str}, source {source_chat_id}:{source_message_id}")
-            return
-        
-        deleted_count = 0
-        error_count = 0
-        permission_errors = 0
-        
-        # Create deletion tasks for ALL destinations in parallel
-        deletion_tasks = []
-        entity_cache = {}  # Cache entities to avoid duplicate lookups
-        
-        for target_chat_key, destination_message_id in destination_messages.items():
-            task = asyncio.create_task(
-                delete_single_message_instant(
-                    target_chat_key, destination_message_id, user_id_str, 
-                    source_message_id, entity_cache
-                )
-            )
-            deletion_tasks.append(task)
-        
-        # Wait for all deletions to complete
-        results = await asyncio.gather(*deletion_tasks, return_exceptions=True)
-        
-        # Count results
-        for result in results:
-            if isinstance(result, Exception):
-                error_count += 1
-                if isinstance(result, (ChannelPrivateError, ChatAdminRequiredError, ChatWriteForbiddenError)):
-                    permission_errors += 1
-            elif result is True:
-                deleted_count += 1
-            else:
-                error_count += 1
-        
-        # Remove the mapping regardless of deletion success
-        remove_message_mapping(user_id_str, source_chat_id, source_message_id)
-        
-        message_time = time.time() - message_start_time
-        log_activity(f"📊 User {user_id_str}: Deleted {deleted_count}/{len(destination_messages)} messages in {message_time:.3f}s (Errors: {error_count}, Permissions: {permission_errors})")
-        
-        # Record performance
-        deletion_performance.record_deletion(
-            success=(deleted_count > 0),
-            deletion_time=message_time,
-            is_permission_error=(permission_errors > 0)
-        )
-        
-    except Exception as e:
-        log_error(f"Error in delete_corresponding_messages_instant for user {user_id_str}", e)
-
-async def delete_single_message_instant(target_chat_key: str, destination_message_id: int, 
-                                      user_id_str: str, source_message_id: int, 
-                                      entity_cache: dict) -> bool:
-    """Delete a single message with optimized entity caching and error handling"""
-    try:
-        # Check cache first
-        if target_chat_key not in entity_cache:
-            try:
-                # Check if target_chat_key is a numeric ID or a username
-                if target_chat_key.lstrip('-').isdigit():
-                    # It's a numeric channel ID
-                    target_chat_id = int(target_chat_key)
-                    target_entity = await client.get_entity(target_chat_id)
-                else:
-                    # It's a username
-                    if not target_chat_key.startswith('@'):
-                        target_chat_key_with_at = '@' + target_chat_key
-                    else:
-                        target_chat_key_with_at = target_chat_key
-                    target_entity = await client.get_entity(target_chat_key_with_at)
-                
-                entity_cache[target_chat_key] = target_entity
-            except Exception as resolve_error:
-                log_error(f"Cannot resolve channel {target_chat_key} for user {user_id_str}", resolve_error)
-                return False
-        else:
-            target_entity = entity_cache[target_chat_key]
-        
-        # Delete the message in destination channel
-        await client.delete_messages(target_entity, [destination_message_id], revoke=True)
-        
-        log_activity(f"✅ INSTANT DELETE: User {user_id_str} - Target {target_chat_key}:{destination_message_id} (Source: {source_message_id})")
-        return True
-        
-    except (ChannelPrivateError, ChatAdminRequiredError, ChatWriteForbiddenError) as e:
-        log_error(f"❌ PERMISSION ERROR: Cannot delete in {target_chat_key} for user {user_id_str}. Bot may lack delete permissions.", e)
-        return False
-    except Exception as e:
-        log_error(f"❌ DELETE ERROR: Error deleting message in {target_chat_key} for user {user_id_str}", e)
-        return False
-
 # ========= MESSAGE EDIT HANDLER =========
 @client.on(events.MessageEdited)
 async def handle_message_edited(event):
@@ -845,6 +447,165 @@ async def update_single_message(target_chat_key: str, destination_message_id: in
         log_error(f"❌ EDIT ERROR: Error updating message in {target_chat_key} for user {user_id_str}", e)
         return False
 
+# ========= ENHANCED INSTANT MESSAGE DELETION HANDLER =========
+@client.on(events.MessageDeleted)
+async def handle_message_deleted(event):
+    """Enhanced message deletion handler with performance monitoring and instant deletion"""
+    try:
+        deletion_start_time = time.time()  
+        # Get the chat where deletion occurred
+        try:
+            chat = await event.get_chat()
+        except Exception as e:
+            log_error("Could not get chat from deletion event", e)
+            return
+            
+        deleted_message_ids = event.deleted_ids
+        
+        if not deleted_message_ids:
+            return
+        
+        log_activity(f"🚨 INSTANT DELETION: Channel {getattr(chat, 'id', 'unknown')} - Message IDs: {deleted_message_ids}")
+        
+        # Clean up orphaned mappings first
+
+        
+        # Refresh settings to get current user configurations
+        fresh_settings = load_settings()
+        
+        # Process for each user CONCURRENTLY for faster processing
+        
+        user_tasks = []
+        for user_id_str, settings in fresh_settings.items():
+            try:
+                routes = settings.get("routes", {})
+                
+                # Check if this chat is a source channel for any of the user's routes
+                for source_channel, targets in routes.items():
+                    if stored_value_matches_chat(source_channel, chat):
+                        
+                        # For each deleted message, create concurrent deletion tasks
+                        for deleted_id in deleted_message_ids:
+                            task = asyncio.create_task(
+                                delete_corresponding_messages_instant(
+                                    user_id_str, chat.id, deleted_id, targets 
+                                )
+                            )
+                            user_tasks.append(task)
+                        break
+            except Exception as e:
+                log_error(f"Error processing message deletion for user {user_id_str}", e)
+        
+        # Wait for all deletion tasks to complete
+        if user_tasks:
+            await asyncio.gather(*user_tasks, return_exceptions=True)
+        
+        deletion_time = time.time() - deletion_start_time
+        log_activity(f"✅ DELETION COMPLETE: Processed {len(deleted_message_ids)} messages in {deletion_time:.3f} seconds")
+       
+    except Exception as e:
+        log_error("Critical error in message deletion handler", e)
+
+async def delete_corresponding_messages_instant(user_id_str: str, source_chat_id: int, source_message_id: int, targets: List[str]) -> None:
+    """INSTANT deletion of corresponding messages with parallel processing"""
+    try:
+        message_start_time = time.time()
+        
+        # Get all destination message IDs for this source message
+        destination_messages = get_destination_message_ids(user_id_str, source_chat_id, source_message_id)
+        
+        if not destination_messages:
+            log_activity(f"❌ No message mappings found for user {user_id_str}, source {source_chat_id}:{source_message_id}")
+            return
+        
+        deleted_count = 0
+        error_count = 0
+        permission_errors = 0
+        
+        # Create deletion tasks for ALL destinations in parallel
+        deletion_tasks = []
+        entity_cache = {}  # Cache entities to avoid duplicate lookups
+        
+        for target_chat_key, destination_message_id in destination_messages.items():
+            task = asyncio.create_task(
+                delete_single_message_instant(
+                    target_chat_key, destination_message_id, user_id_str, 
+                    source_message_id, entity_cache
+                )
+            )
+            deletion_tasks.append(task)
+        
+        # Wait for all deletions to complete
+        results = await asyncio.gather(*deletion_tasks, return_exceptions=True)
+        
+        # Count results
+        for result in results:
+            if isinstance(result, Exception):
+                error_count += 1
+                if isinstance(result, (ChannelPrivateError, ChatAdminRequiredError, ChatWriteForbiddenError)):
+                    permission_errors += 1
+            elif result is True:
+                deleted_count += 1
+            else:
+                error_count += 1
+        
+        # Remove the mapping regardless of deletion success
+        remove_message_mapping(user_id_str, source_chat_id, source_message_id)
+        
+        message_time = time.time() - message_start_time
+        log_activity(f"📊 User {user_id_str}: Deleted {deleted_count}/{len(destination_messages)} messages in {message_time:.3f}s (Errors: {error_count}, Permissions: {permission_errors})")
+        
+        # Record performance
+        deletion_performance.record_deletion(
+            success=(deleted_count > 0),
+            deletion_time=message_time,
+            is_permission_error=(permission_errors > 0)
+        )
+        
+    except Exception as e:
+        log_error(f"Error in delete_corresponding_messages_instant for user {user_id_str}", e)
+
+async def delete_single_message_instant(target_chat_key: str, destination_message_id: int, 
+                                      user_id_str: str, source_message_id: int, 
+                                      entity_cache: dict) -> bool:
+    """Delete a single message with optimized entity caching and error handling"""
+    try:
+        # Check cache first
+        if target_chat_key not in entity_cache:
+            try:
+                # Check if target_chat_key is a numeric ID or a username
+                if target_chat_key.lstrip('-').isdigit():
+                    # It's a numeric channel ID
+                    target_chat_id = int(target_chat_key)
+                    target_entity = await client.get_entity(target_chat_id)
+                else:
+                    # It's a username
+                    if not target_chat_key.startswith('@'):
+                        target_chat_key_with_at = '@' + target_chat_key
+                    else:
+                        target_chat_key_with_at = target_chat_key
+                    target_entity = await client.get_entity(target_chat_key_with_at)
+                
+                entity_cache[target_chat_key] = target_entity
+            except Exception as resolve_error:
+                log_error(f"Cannot resolve channel {target_chat_key} for user {user_id_str}", resolve_error)
+                return False
+        else:
+            target_entity = entity_cache[target_chat_key]
+        
+        # Delete the message in destination channel
+        await client.delete_messages(target_entity, [destination_message_id],revoke=True)
+        
+        log_activity(f"✅ INSTANT DELETE: User {user_id_str} - Target {target_chat_key}:{destination_message_id} (Source: {source_message_id})")
+        return True
+        
+    except (ChannelPrivateError, ChatAdminRequiredError, ChatWriteForbiddenError) as e:
+        log_error(f"❌ PERMISSION ERROR: Cannot delete in {target_chat_key} for user {user_id_str}. Bot may lack delete permissions.", e)
+        return False
+    except Exception as e:
+        log_error(f"❌ DELETE ERROR: Error deleting message in {target_chat_key} for user {user_id_str}", e)
+        return False
+
 # ========= DISCORD ROUTE MANAGEMENT =========
 def load_discord_routes() -> Dict:
     """Load Discord routes from JSON file"""
@@ -896,8 +657,7 @@ async def start_discord_route_management(update: Update) -> None:
             "• Messages from specified Telegram channels will be forwarded to Discord channels\n"
             "• Text, images, and basic media are supported\n"
             "• You need Discord bot token with required permissions\n"
-            "• The bot must have access to the Discord channels\n"
-            "• <b>NEW:</b> Message deletion in Telegram will also delete messages in Discord"
+            "• The bot must have access to the Discord channels"
         )
         
         keyboard = get_discord_management_keyboard()
@@ -1127,7 +887,6 @@ async def complete_discord_route_creation(update: Update, user_id: int) -> None:
                 f"• Messages from the Telegram channel will be forwarded to the Discord channel\n"
                 f"• Text messages and images are supported\n"
                 f"• Forwarding happens in real-time\n"
-                f"• <b>NEW:</b> Message deletion in Telegram will also delete messages in Discord\n"
                 f"• Use 📋 View Discord Routes to see all your routes\n\n"
                 f"🔧 <b>Note:</b> Make sure your Discord bot has proper permissions in the channel!"
             )
@@ -1184,8 +943,7 @@ async def view_discord_routes(update: Update) -> None:
                 f"🔗 <b>Your Discord Routes</b>\n\n"
                 f"📊 Total Routes: <b>{total_routes}</b>\n\n" +
                 "\n".join(lines) +
-                f"\n💡 Messages from these Telegram channels will be forwarded to the corresponding Discord channels.\n"
-                f"🔗 <b>NEW:</b> Message deletion in Telegram will also delete messages in Discord."
+                f"\n💡 Messages from these Telegram channels will be forwarded to the corresponding Discord channels."
             )
         
         keyboard = [
@@ -1429,8 +1187,7 @@ async def show_discord_settings(update: Update) -> None:
                 "• Forward messages from Telegram to Discord channels\n"
                 "• Support for text and image messages\n"
                 "• Real-time forwarding\n"
-                "• Multiple routes management\n"
-                "• <b>NEW:</b> Message deletion sync between Telegram and Discord\n\n"
+                "• Multiple routes management\n\n"
             )
             
             if DISCORD_TOKEN:
@@ -1439,16 +1196,14 @@ async def show_discord_settings(update: Update) -> None:
                     "• Your Discord bot must be invited to the server\n"
                     "• Bot must have 'Send Messages' permission in target channels\n"
                     "• Bot must have 'Attach Files' permission for media\n"
-                    "• Bot must have 'Embed Links' permission for rich content\n"
-                    "• Bot must have 'Manage Messages' permission for deletion sync"
+                    "• Bot must have 'Embed Links' permission for rich content"
                 )
             else:
                 text += (
                     "🔧 <b>Webhook Setup:</b>\n"
                     "• Webhook URL is configured\n"
                     "• No additional permissions needed\n"
-                    "• Make sure webhook is not deleted from Discord\n"
-                    "• <b>Note:</b> Webhook method does not support message deletion sync"
+                    "• Make sure webhook is not deleted from Discord"
                 )
         else:
             text += (
@@ -1510,25 +1265,15 @@ async def forward_to_discord(event, user_id: int) -> None:
                 
                 # Forward to all Discord channels for this source channel
                 for channel_info in channels:
-                    discord_message_id = await send_to_discord_channel(event, channel_info, user_id)
-                    
-                    # Store Discord message mapping for deletion sync
-                    if discord_message_id:
-                        update_discord_message_mapping(
-                            str(user_id), 
-                            chat.id, 
-                            event.message.id,
-                            channel_info["channel_id"],
-                            discord_message_id
-                        )
+                    await send_to_discord_channel(event, channel_info, user_id)
                 
                 break
                 
     except Exception as e:
         log_error(f"Error in Discord forwarding for user {user_id}", e)
 
-async def send_to_discord_channel(event, channel_info: Dict, user_id: int) -> Optional[str]:
-    """Send message to a specific Discord channel and return message ID if successful"""
+async def send_to_discord_channel(event, channel_info: Dict, user_id: int) -> None:
+    """Send message to a specific Discord channel"""
     try:
         channel_id = channel_info["channel_id"]
         message_text = event.message.message or ""
@@ -1536,68 +1281,59 @@ async def send_to_discord_channel(event, channel_info: Dict, user_id: int) -> Op
         
         if media_type == "photo" and event.message.media:
             # Handle photo
-            message_id = await send_photo_to_discord(event, channel_id, message_text, user_id)
+            await send_photo_to_discord(event, channel_id, message_text, user_id)
         elif message_text.strip():
             # Handle text message
-            message_id = await send_text_to_discord(channel_id, message_text, user_id)
+            await send_text_to_discord(channel_id, message_text, user_id)
         else:
             # For other media types, send as text with description
             if message_text.strip():
-                message_id = await send_text_to_discord(channel_id, message_text, user_id)
+                await send_text_to_discord(channel_id, message_text, user_id)
             else:
                 # If no text and unsupported media, send a generic message
                 media_description = f"📎 {media_type.capitalize()} shared"
-                message_id = await send_text_to_discord(channel_id, media_description, user_id)
-        
-        return message_id
+                await send_text_to_discord(channel_id, media_description, user_id)
                 
     except Exception as e:
         log_error(f"Error sending to Discord channel {channel_info['channel_name']} for user {user_id}", e)
-        return None
 
-async def send_text_to_discord(channel_id: str, text: str, user_id: int) -> Optional[str]:
-    """Send text message to Discord channel and return message ID"""
+async def send_text_to_discord(channel_id: str, text: str, user_id: int) -> None:
+    """Send text message to Discord channel"""
     try:
         # Use webhook if available, otherwise use bot token
         if DISCORD_WEBHOOK_URL:
-            message_id = await send_via_webhook(channel_id, text, user_id)
+            await send_via_webhook(channel_id, text, user_id)
         elif DISCORD_TOKEN:
-            message_id = await send_via_bot(channel_id, text, user_id)
+            await send_via_bot(channel_id, text, user_id)
         else:
             log_error("No Discord credentials configured", None)
-            return None
-        
-        return message_id
+            return
                     
     except Exception as e:
         log_error(f"Error sending text to Discord channel {channel_id}", e)
-        return None
 
-async def send_photo_to_discord(event, channel_id: str, caption: str, user_id: int) -> Optional[str]:
-    """Send photo to Discord channel and return message ID"""
+async def send_photo_to_discord(event, channel_id: str, caption: str, user_id: int) -> None:
+    """Send photo to Discord channel"""
     try:
         # Download photo
         photo_data = await download_media(event, "photo")
         if not photo_data:
-            return None
+            return
             
         # Use webhook if available, otherwise use bot token
         if DISCORD_WEBHOOK_URL:
-            message_id = await send_photo_via_webhook(channel_id, photo_data, caption, user_id)
+            await send_photo_via_webhook(channel_id, photo_data, caption, user_id)
         elif DISCORD_TOKEN:
-            message_id = await send_photo_via_bot(channel_id, photo_data, caption, user_id)
+            await send_photo_via_bot(channel_id, photo_data, caption, user_id)
         else:
             log_error("No Discord credentials configured", None)
-            return None
-        
-        return message_id
+            return
                     
     except Exception as e:
         log_error(f"Error sending photo to Discord channel {channel_id}", e)
-        return None
 
-async def send_via_webhook(channel_id: str, text: str, user_id: int) -> Optional[str]:
-    """Send message to Discord via webhook and return message ID"""
+async def send_via_webhook(channel_id: str, text: str, user_id: int) -> None:
+    """Send message to Discord via webhook"""
     try:
         webhook = SyncWebhook.from_url(DISCORD_WEBHOOK_URL)
         
@@ -1605,19 +1341,14 @@ async def send_via_webhook(channel_id: str, text: str, user_id: int) -> Optional
         if len(text) > 2000:
             text = text[:1997] + "..."
             
-        # Webhook doesn't return message ID easily, so we can't track deletions with webhook
         webhook.send(content=text)
         log_activity(f"User {user_id}: Text successfully sent to Discord via webhook")
         
-        # Webhook method doesn't support message deletion tracking
-        return None
-        
     except Exception as e:
         log_error(f"Error sending via webhook to Discord channel {channel_id}", e)
-        return None
 
-async def send_via_bot(channel_id: str, text: str, user_id: int) -> Optional[str]:
-    """Send message to Discord via bot API and return message ID"""
+async def send_via_bot(channel_id: str, text: str, user_id: int) -> None:
+    """Send message to Discord via bot API"""
     try:
         headers = {
             'Authorization': f'Bot {DISCORD_TOKEN}',
@@ -1637,21 +1368,16 @@ async def send_via_bot(channel_id: str, text: str, user_id: int) -> Optional[str
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
-                    response_data = await response.json()
-                    message_id = response_data.get('id')
-                    log_activity(f"User {user_id}: Text successfully sent to Discord channel {channel_id}, message ID: {message_id}")
-                    return message_id
+                    log_activity(f"User {user_id}: Text successfully sent to Discord channel {channel_id}")
                 else:
                     error_text = await response.text()
                     log_error(f"Discord API error: {response.status} - {error_text}", None)
-                    return None
         
     except Exception as e:
         log_error(f"Error sending via bot to Discord channel {channel_id}", e)
-        return None
 
-async def send_photo_via_webhook(channel_id: str, photo_data: bytes, caption: str, user_id: int) -> Optional[str]:
-    """Send photo to Discord via webhook and return message ID"""
+async def send_photo_via_webhook(channel_id: str, photo_data: bytes, caption: str, user_id: int) -> None:
+    """Send photo to Discord via webhook"""
     try:
         webhook = SyncWebhook.from_url(DISCORD_WEBHOOK_URL)
         
@@ -1667,15 +1393,11 @@ async def send_photo_via_webhook(channel_id: str, photo_data: bytes, caption: st
             
         log_activity(f"User {user_id}: Photo successfully sent to Discord via webhook")
         
-        # Webhook method doesn't support message deletion tracking
-        return None
-        
     except Exception as e:
         log_error(f"Error sending photo via webhook to Discord channel {channel_id}", e)
-        return None
 
-async def send_photo_via_bot(channel_id: str, photo_data: bytes, caption: str, user_id: int) -> Optional[str]:
-    """Send photo to Discord via bot API and return message ID"""
+async def send_photo_via_bot(channel_id: str, photo_data: bytes, caption: str, user_id: int) -> None:
+    """Send photo to Discord via bot API"""
     try:
         headers = {
             'Authorization': f'Bot {DISCORD_TOKEN}'
@@ -1693,18 +1415,13 @@ async def send_photo_via_bot(channel_id: str, photo_data: bytes, caption: str, u
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=data, headers=headers) as response:
                 if response.status == 200:
-                    response_data = await response.json()
-                    message_id = response_data.get('id')
-                    log_activity(f"User {user_id}: Photo successfully sent to Discord channel {channel_id}, message ID: {message_id}")
-                    return message_id
+                    log_activity(f"User {user_id}: Photo successfully sent to Discord channel {channel_id}")
                 else:
                     error_text = await response.text()
                     log_error(f"Discord API error: {response.status} - {error_text}", None)
-                    return None
         
     except Exception as e:
         log_error(f"Error sending photo via bot to Discord channel {channel_id}", e)
-        return None
 
 # ========= DISCORD DELETION PAGINATION HANDLER =========
 async def handle_discord_source_pagination(update: Update, page: int) -> None:
@@ -3433,8 +3150,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔹 <b>Smart Media Filtering</b> - Control which media types get forwarded\n"
         "🔹 <b>Keyword Filtering</b> - Forward only messages containing specific keywords\n"
         "🔹 <b>Discord Integration</b> - Forward messages to Discord channels\n"
-        "🔹 <b>Multiple Routes</b> - Forward from one source to multiple destinations\n"
-        "🔹 <b>NEW: Discord Deletion Sync</b> - Messages deleted in Telegram also get deleted in Discord\n\n"
+        "🔹 <b>Multiple Routes</b> - Forward from one source to multiple destinations\n\n"
         "💡 <b>Quick Start:</b>\n"
         "1. 📋 Select Channels - Choose source channels\n"
         "2. ⚙️ Manage Channels - Review selected channels\n"
@@ -4914,6 +4630,8 @@ async def handle_confirm_deletion(update: Update) -> None:
     user_settings[user_id_str]["disabled_routes"] = disabled_routes
     save_settings()
     
+
+    
     await update.callback_query.answer(f"🗑️ Deleted {deleted_count} routes")
     
     # Exit deletion mode and return to management
@@ -5265,8 +4983,7 @@ async def handle_help(update: Update) -> None:
         "• <b>Instant Deletion Sync</b> - Delete in source = delete in destinations\n"
         "• <b>Media Filtering</b> - Choose which media types to forward\n"
         "• <b>Keyword Filtering</b> - Forward only messages with specific keywords\n"
-        "• <b>Discord Integration</b> - Forward to Discord channels\n"
-        "• <b>NEW: Discord Deletion Sync</b> - Messages deleted in Telegram also get deleted in Discord\n\n"
+        "• <b>Discord Integration</b> - Forward to Discord channels\n\n"
         
         "🔹 <b>Quick Start Guide:</b>\n"
         "1. <b>📋 Select Channels</b> - Choose source channels to monitor\n"
@@ -5291,8 +5008,7 @@ async def handle_help(update: Update) -> None:
         "• Forward messages from Telegram to Discord\n"
         "• Set up Discord bot token or webhook\n"
         "• Manage Discord routes separately\n"
-        "• Supports text and image messages\n"
-        "• <b>NEW:</b> Message deletion sync between Telegram and Discord\n\n"
+        "• Supports text and image messages\n\n"
         
         "🔹 <b>Troubleshooting:</b>\n"
         "• <b>Messages not forwarding?</b> Check routes are enabled\n"
@@ -5573,25 +5289,13 @@ def setup_bot():
 async def main():
     """Main function to start both Telegram client and bot"""
     try:
-        # Setup signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, lambda s, f: asyncio.create_task(graceful_shutdown.shutdown()))
-        signal.signal(signal.SIGTERM, lambda s, f: asyncio.create_task(graceful_shutdown.shutdown()))
-        
-        # Initialize message mapping systems
-        setup_message_mappings_file()
-        setup_discord_message_mappings_file()
-        
         # Start the Telegram client
         await client.start()
         log_activity("Telegram client started successfully")
-        
-        # Clean up orphaned mappings
-        cleanup_orphaned_mappings()
+        # cleanup_orphaned_mappings()
         
         # Load message mappings for deletion sync
         message_mappings = load_message_mappings()
-        discord_message_mappings = load_discord_message_mappings()
-        
         # Setup and start the bot
         application = setup_bot()
         
@@ -5611,7 +5315,10 @@ async def main():
         log_error("Critical error in main function", e)
     finally:
         # Cleanup
-        await graceful_shutdown.shutdown()
+        if 'application' in locals():
+            await application.stop()
+        await client.disconnect()
+        log_activity("Bot shutdown completed")
 
 if __name__ == "__main__":
     asyncio.run(main())
